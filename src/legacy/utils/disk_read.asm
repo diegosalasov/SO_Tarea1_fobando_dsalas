@@ -1,9 +1,9 @@
-; Simple boot loader disc sector reader via interrupts
+; Simple boot loader disk sector reader via interrupts
 read_sector:
     ; Prerequisites: ES:BX (dest), DL (drive), CH/DH/CL (CHS)
-    mov ah, 0x02
-    mov al, 0x01
-    int 0x13
+    mov ah, 0x02    ; function: read sectors
+    mov al, 0x01    ; number of sectors
+    int 0x13        ; interrupt: disk services
     jc .fail        ; Jump if Carry Flag (CF) is set (failure)
     ret
 
