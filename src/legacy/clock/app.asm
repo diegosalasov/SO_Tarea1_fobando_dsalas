@@ -17,8 +17,8 @@ BITS 16
 ;   .COM ejecutable temporalmente mediante DOSBox.
 ;
 ; Version normal:
-;   binario plano que posteriormente sera cargado
-;   por nuestro boot loader.
+;   binario plano cargado por el boot loader Legacy
+;   en la direccion fisica 0000:7E00.
 ; ------------------------------------------------------------
 
 %ifdef DOS_TEST
@@ -27,7 +27,7 @@ BITS 16
 
 %else
 
-    ORG 0x0000
+    ORG 0x7E00
 
 %endif
 
