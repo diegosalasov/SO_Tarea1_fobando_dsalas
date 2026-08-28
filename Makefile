@@ -3,33 +3,42 @@ ASM  = nasm
 QEMU = qemu-system-i386
 GDB  = gdb
 
+# Targets
+MODE = legacy
+
 # Diretories
-LEGACY_DIR = src/legacy
-UEFI_DIR   = src/uefi
+SRC_DIR   = src/$(MODE)
+BUILD_DIR  = build/$(MODE)
 
 # Files
-BOOT = boot.asm
-IMG  = disk.img
-
-# Targets
-LEGACY_BOOT = $(LEGACY_DIR)/boot/$(BOOT)
+BOOT = $(SRC_DIR)/boot/boot.asm
+IMG  = $(BUILD_DIR)/disk.img
+BIN  = $(BUILD_DIR)/boot.bin
 
 .PHONY: all build run debug clean
 
 all: build
 
+# Make directories if they don't exist
+dirs:
+	@echo "Creating build directories... ($(MODE) mode)"
+	mkdir -p $(BUILD_DIR)
+
 # Assemble bootloader and create disk image
-build:
-	$(ASM) -f bin $(LEGACY_BOOT) -o boot.bin
+build: dirs
+	@echo "Building bootloader... ($(MODE) mode)"
+	$(ASM) -f bin $(BOOT) -o $(BIN)
 	dd if=/dev/zero of=$(IMG) bs=512 count=2880
-	dd if=boot.bin of=$(IMG) conv=notrunc
+	dd if=$(BIN) of=$(IMG) conv=notrunc
 
 # Run normally
 run: build
+	@echo "Running QEMU... ($(MODE) mode)"
 	$(QEMU) -drive format=raw,file=$(IMG)
 
 # Run QEMU waiting for GDB
 debug: build
+	@echo "Running QEMU in debug mode... ($(MODE) mode)"
 	$(QEMU) \
 		-drive format=raw,file=$(IMG) \
 		-S \
@@ -37,4 +46,6 @@ debug: build
 
 # Remove generated files
 clean:
-	rm -f boot.bin $(IMG)
+	@echo "Cleaning generated files... ($(MODE) mode)"
+	rm -f $(BIN) $(IMG)
+	@echo "Done."
