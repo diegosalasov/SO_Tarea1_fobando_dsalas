@@ -75,11 +75,16 @@ build: $(DISK_IMG)
 # ============================================================
 
 run: build
-	$(QEMU) -drive format=raw,file=$(DISK_IMG)
+	$(QEMU) \
+		-drive file=$(DISK_IMG),format=raw,if=floppy \
+		-boot a \
+		-rtc base=localtime
 
 debug: build
 	$(QEMU) \
-		-drive format=raw,file=$(DISK_IMG) \
+		-drive file=$(DISK_IMG),format=raw,if=floppy \
+		-boot a \
+		-rtc base=localtime \
 		-S \
 		-gdb tcp::1234
 

@@ -4,8 +4,9 @@
 **Prof. Luis Barboza Artavia**
 
 Estudiantes:
-- Diego Salas Ovares [2023xxxxxx]
 - Frederick Obando Solano [2023087683]
+- Diego Salas Ovares [2023107645]
+
 
 ---
 
