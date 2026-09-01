@@ -6,49 +6,43 @@ global efi_main
 ;_______/ UEFI documentation
 
 ; Microsoft x64 calling convention
-/* 
-RAX: return 
-RCX: parameter 1
-RDX: parameter 2
-R8:  parameter 3
-R9:  parameter 4
-*/
+; RAX: return 
+; RCX: parameter 1
+; RDX: parameter 2
+; R8:  parameter 3
+; R9:  parameter 4
 
 ; EFI System Table
-/* 
-offset    size    service/protocol
-────────────────────────────────────────
-0x00      24      EFI_TABLE_HEADER
-0x18       8      FirmwareVendor
-0x20       4      FirmwareRevision
-0x24       4      padding
-0x28       8      ConsoleInHandle
-0x30       8      ConIn
-0x38       8      ConsoleOutHandle
-0x40       8      ConOut
-0x48       8      StandardErrorHandle
-0x50       8      StdErr
-0x58       8      RuntimeServices
-0x60       8      BootServices
-0x68       8      NumberOfTableEntries
-0x70       8      ConfigurationTable
-*/
+; offset    size    service/protocol
+; ────────────────────────────────────────
+; 0x00      24      EFI_TABLE_HEADER
+; 0x18       8      FirmwareVendor
+; 0x20       4      FirmwareRevision
+; 0x24       4      padding
+; 0x28       8      ConsoleInHandle
+; 0x30       8      ConIn
+; 0x38       8      ConsoleOutHandle
+; 0x40       8      ConOut
+; 0x48       8      StandardErrorHandle
+; 0x50       8      StdErr
+; 0x58       8      RuntimeServices
+; 0x60       8      BootServices
+; 0x68       8      NumberOfTableEntries
+; 0x70       8      ConfigurationTable
 
 ; ConOut functions
-/* 
-offset    size    function
-────────────────────────────────────────
-0x00       8      Reset
-0x00       8      OutputString
-0x00       8      TestString
-0x00       8      QueryMode
-0x00       8      SetMode
-0x00       8      SetAttribute
-0x00       8      ClearScreen
-0x00       8      SetCursorPosition
-0x00       8      EnableCursor
-0x00       8      *Mode
-*/
+; offset    size    function
+; ────────────────────────────────────────
+; 0x00       8      Reset
+; 0x00       8      OutputString
+; 0x00       8      TestString
+; 0x00       8      QueryMode
+; 0x00       8      SetMode
+; 0x00       8      SetAttribute
+; 0x00       8      ClearScreen
+; 0x00       8      SetCursorPosition
+; 0x00       8      EnableCursor
+; 0x00       8      *Mode
 
 
 ;        ______________________________________________________
@@ -67,24 +61,15 @@ efi_main:
     ; Print a startup message
     ;---------------------------------------------------------
     ; [SystemTable -> ConOut(protocol) -> OutputString(function)]
-    mov r8, rdx     ; R8 -> SystemTable
-    
-    mov rcx, [r8 + 0x40]        ; RCX = ConOut [at offset 0x40]
-    lea rdx, [rel msg]          ; RDX = string address
-
-    mov rax, [rcx + 0x08]       ; RAX = OutputString [at offset 0x08]
-    call rax                    ; call OutputString(ConOut, message)
+    lea rcx, [rel msg]     ; RCX = string addr
+    call print_string      ; call PrintString(message)  
 
     ;---------------------------------------------------------
     ; Print a message before calling kernel/program
     ;---------------------------------------------------------
     ; [SystemTable -> ConOut(protocol) -> OutputString(function)]
-    mov r8,  [SYSTEM_TABLE]      ; R8 -> SystemTable
-    mov rcx, [r8 + 0x40]        ; RCX = ConOut [at offset 0x40]
-    lea rdx, [rel sys_msg]      ; RDX = string address
-
-    mov rax, [rcx + 0x08]      ; RAX = OutputString [at offset 0x08]
-    call rax                    ; call OutputString(ConOut, message)
+    lea rcx, [rel sys_msg] ; RCX = string addr
+    call print_string      ; call PrintString(message)  
 
     ;---------------------------------------------------------
     ; Use EFI filesystem to load the .BIN file for kernel/program (hand-off)
@@ -92,10 +77,10 @@ efi_main:
 
     ; (1) Locate the filesystem handle
     ; [SystemTable -> BootServices -> LocateHandleBuffer]
+    mov r8, [SYSTEM_TABLE]  ; R8
 
     ; (2) Get the filesystem handle
     ; [HandleBuffer -> SimpleFileSystem]
-    mov r8, [SYSTEM_TABLE]
 
     ; (3) Get the SimpleFileSystem protocol
     ; [SystemTable -> BootServices -> HandleProtocol]
@@ -118,19 +103,31 @@ efi_main:
 
 
     ;---------------------------------------------------------
-    ; IF kernel/program returns print a message
+    ; If kernel/program returns print a message
     ;---------------------------------------------------------
-    ; [SystemTable -> ConOut(protocol) -> OutputString(function)]
-    mov r8,  [SYSTEM_TABLE]     ; R8 -> SystemTable
-    mov rcx, [r8 + 0x40]        ; RCX = ConOut [at offset 0x40]
-    lea rdx, [rel end_msg]      ; RDX = string address
-
-    mov rax, [rcx + 0x08]      ; RAX = OutputString [at offset 0x08]
-    call rax                    ; call OutputString(ConOut, message)
+    lea rcx, [rel end_msg] ; RCX = string addr
+    call print_string      ; call PrintString(message)   
 
     ; end
-    xor eax, eax                ; EFI_SUCCESS
+    xor eax, eax            ; EFI_SUCCESS
     jmp  $ ; loop forever
+    ret
+
+; PrintString(*str): string must be utf-16
+; [SystemTable -> ConOut -> OutputString]
+; RCX = string addr
+print_string:
+    ; start
+    mov rbx, rcx
+    mov r8, [SYSTEM_TABLE]  ; R8  = SystemTable
+    
+    mov rcx, [r8 + 0x40]    ; RCX = ConOut [at offset 0x40]
+    mov rdx, rbx            ; RDX = string address
+
+    mov rax, [rcx + 0x08]   ; RAX = OutputString [at offset 0x08]
+    call rax                ; call OutputString(ConOut, message)
+
+    ; end
     ret
 
 ;        ______________________________________________________
