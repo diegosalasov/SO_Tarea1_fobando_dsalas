@@ -1,7 +1,7 @@
 [BITS 16]       ; 16 bit mode
 [ORG 0x7C00]    ; Set the origin to 0x7C00, where the BIOS loads the bootloader
 
-; Bootloader stages
+; Bootloader setup
 clock equ 0x7E00
 
 ; Bootloader code (512 bytes)
@@ -34,7 +34,7 @@ start:
     ; End of bootloader code (loop forever)
     jmp $
 
-app equ 0x7E00
+; Bootloader data
 message db "Bootloader running...", 0x0D, 0x0A, 0
 
 ; Bootloader utilities

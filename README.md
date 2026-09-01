@@ -27,6 +27,8 @@ Crear un programa de reloj (con funcionalidades de hora, alarama y cronometro) b
 - QEMU + GDB: `sudo apt install qemu-system-x86`
 - NASM: `sudo apt install nasm`
 - GCC: `sudo apt install gcc`
+- OVMF: `sudo apt install ovmf`
+- MinGW-w64: `sudo apt install mingw-w64`
 - Make: `sudo apt install make`
 
 ## Compilacion
