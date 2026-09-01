@@ -14,7 +14,7 @@ CLOCK_SOURCES := $(wildcard $(CLOCK_DIR)/*.asm) \
 	$(wildcard $(CLOCK_DIR)/include/*.inc)
 
 
-.PHONY: all app build prog run clean dirs
+.PHONY: all app boot build prog program run debug clean dirs
 
 all: build
 
@@ -60,7 +60,11 @@ APP_ASM_FLAGS := -f bin \
 
 app: $(APP_BIN)
 
+boot: $(BOOT_BIN)
+
 prog: app
+
+program: app
 
 
 $(APP_BIN): $(CLOCK_SOURCES) | dirs
@@ -75,6 +79,7 @@ $(BOOT_BIN): $(BOOT_SOURCES) $(APP_BIN) | dirs
 	@app_size=$$(wc -c < "$(APP_BIN)"); \
 	app_sectors=$$(( ($$app_size + 511) / 512 )); \
 	if [ "$$app_sectors" -gt 17 ]; then \
+		echo "ERROR: app.bin ocupa $$app_sectors sectores; Legacy admite como maximo 17" >&2; \
 		exit 1; \
 	fi; \
 	$(NASM) -f bin \
@@ -173,12 +178,16 @@ else ifeq ($(MODE),uefi)
 
 QEMU := qemu-system-x86_64
 
+BOOT_SRC := $(SRC_DIR)/boot/boot.asm
+
 APP_OBJ := $(BUILD_DIR)/clock.obj
 APP_EFI := $(BUILD_DIR)/clock.efi
+BOOT_OBJ := $(BUILD_DIR)/boot.obj
+BOOT_EFI := $(BUILD_DIR)/bootx64.efi
 DISK_IMG := $(BUILD_DIR)/uefi.img
 
-OVMF_CODE := /usr/share/OVMF/OVMF_CODE_4M.fd
-OVMF_VARS_TEMPLATE := /usr/share/OVMF/OVMF_VARS_4M.fd
+OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
+OVMF_VARS_TEMPLATE ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 OVMF_VARS := $(BUILD_DIR)/OVMF_VARS.fd
 
 
@@ -188,7 +197,11 @@ OVMF_VARS := $(BUILD_DIR)/OVMF_VARS.fd
 
 app: $(APP_EFI)
 
+boot: $(BOOT_EFI)
+
 prog: app
+
+program: app
 
 
 $(APP_OBJ): $(CLOCK_SOURCES) | dirs
@@ -212,6 +225,34 @@ $(APP_EFI): $(APP_OBJ)
 		$(APP_OBJ)
 
 
+# ============================================================
+# Bootloader UEFI
+# ============================================================
+
+$(BOOT_OBJ): $(BOOT_SRC) $(APP_EFI) | dirs
+	@app_size=$$(wc -c < "$(APP_EFI)"); \
+	if [ "$$app_size" -gt 1048576 ]; then \
+		echo "ERROR: clock.efi excede el buffer de 1 MiB del bootloader" >&2; \
+		exit 1; \
+	fi
+	$(NASM) \
+		-f win64 \
+		$(BOOT_SRC) \
+		-o $(BOOT_OBJ)
+
+
+$(BOOT_EFI): $(BOOT_OBJ)
+	$(LLD_LINK) \
+		/nologo \
+		/subsystem:efi_application \
+		/entry:efi_main \
+		/machine:x64 \
+		/nodefaultlib \
+		/dll \
+		/out:$(BOOT_EFI) \
+		$(BOOT_OBJ)
+
+
 $(OVMF_VARS): | dirs
 	cp $(OVMF_VARS_TEMPLATE) $(OVMF_VARS)
 
@@ -220,7 +261,7 @@ $(OVMF_VARS): | dirs
 # Imagen FAT UEFI
 # ============================================================
 
-$(DISK_IMG): $(APP_EFI) | dirs
+$(DISK_IMG): $(BOOT_EFI) $(APP_EFI) | dirs
 	dd if=/dev/zero \
 		of=$(DISK_IMG) \
 		bs=1M \
@@ -231,10 +272,15 @@ $(DISK_IMG): $(APP_EFI) | dirs
 
 	mmd -i $(DISK_IMG) ::/EFI
 	mmd -i $(DISK_IMG) ::/EFI/BOOT
+	mmd -i $(DISK_IMG) ::/EFI/CLOCK
+
+	mcopy -i $(DISK_IMG) \
+		$(BOOT_EFI) \
+		::/EFI/BOOT/BOOTX64.EFI
 
 	mcopy -i $(DISK_IMG) \
 		$(APP_EFI) \
-		::/EFI/BOOT/BOOTX64.EFI
+		::/EFI/CLOCK/CLOCK.EFI
 
 
 build: $(DISK_IMG) $(OVMF_VARS)
@@ -247,10 +293,27 @@ build: $(DISK_IMG) $(OVMF_VARS)
 run: build
 	$(QEMU) \
 		-machine q35 \
+		-m 128M \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=$(OVMF_VARS) \
 		-drive format=raw,file=$(DISK_IMG) \
 		-rtc base=localtime
+
+
+# ============================================================
+# Depuracion UEFI
+# ============================================================
+
+debug: build
+	$(QEMU) \
+		-machine q35 \
+		-m 128M \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,format=raw,file=$(OVMF_VARS) \
+		-drive format=raw,file=$(DISK_IMG) \
+		-rtc base=localtime \
+		-S \
+		-gdb tcp::1234
 
 
 # ============================================================
