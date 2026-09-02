@@ -48,7 +48,7 @@ dirs:
 
 
 # Compile programs
-program:
+program: dirs
 	@echo "Creating program binaries..."
 	@echo "> Compiling kernel: clock"
 	$(ASM) -f bin $(KERNEL) -o $(KERNEL_BIN)
@@ -57,7 +57,7 @@ program:
 	@echo
 
 # Assemble bootloader and create disk image
-build: dirs program
+build: program
 	@echo "Building bootloader..."
 	@echo "[MODE = $(MODE)]"
 	@if [ "$(MODE)" = "legacy" ]; then \
