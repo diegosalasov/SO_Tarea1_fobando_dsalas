@@ -1,302 +1,497 @@
-[BITS 64]
-default rel
+; ============================================================
+; boot.asm
+;
+; Cargador UEFI x86-64.
+;
+; El firmware carga este archivo como EFI/BOOT/BOOTX64.EFI.
+; El cargador abre EFI/CLOCK/CLOCK.EFI desde el mismo volumen,
+; lo carga mediante LoadImage() y le transfiere el control con
+; StartImage().
+; ============================================================
+
+BITS 64
+DEFAULT REL
 
 global efi_main
-;        ______________________________________________________
-;_______/ UEFI documentation
-
-; Microsoft x64 calling convention
-; RAX: return 
-; RCX: parameter 1
-; RDX: parameter 2
-; R8:  parameter 3
-; R9:  parameter 4
-
-; EFI System Table
-; offset    size    service/protocol
-; ────────────────────────────────────────
-; 0x00      24      EFI_TABLE_HEADER
-; 0x18       8      FirmwareVendor
-; 0x20       4      FirmwareRevision
-; 0x24       4      padding
-; 0x28       8      ConsoleInHandle
-; 0x30       8      ConIn
-; 0x38       8      ConsoleOutHandle
-; 0x40       8      ConOut
-; 0x48       8      StandardErrorHandle
-; 0x50       8      StdErr
-; 0x58       8      RuntimeServices
-; 0x60       8      BootServices
-; 0x68       8      NumberOfTableEntries
-; 0x70       8      ConfigurationTable
-
-; ConOut functions
-; offset    size    function
-; ────────────────────────────────────────
-; 0x00       8      Reset
-; 0x08       8      OutputString
-; 0x10       8      TestString
-; 0x18       8      QueryMode
-; 0x20       8      SetMode
-; 0x28       8      SetAttribute
-; 0x30       8      ClearScreen
-; 0x38       8      SetCursorPosition
-; 0x40       8      EnableCursor
-; 0x48       8      *Mode
 
 
-;        ______________________________________________________
-;_______/ Constants section
+; ============================================================
+; Constantes UEFI x86-64
+; ============================================================
 
-; Protocols & Services
-EFI_TEXT_OUTPUT      equ 0x40
-EFI_BOOT_SERVICES    equ 0x60
+EFI_SUCCESS                 equ 0
+EFI_LOAD_ERROR              equ 0x8000000000000001
+EFI_NOT_FOUND               equ 0x800000000000000E
 
-; Functions
-COUT_OUTPUT_STRING   equ 0x08
+EFI_LOADER_DATA             equ 2
+EFI_FILE_MODE_READ          equ 1
 
-BS_LOCATE_HANDLE_BUF equ 0x138
-BS_HANDLE_PROTOCOL   equ 0x98
-BS_ALLOCATE_POOL     equ 0x40
+APP_BUFFER_SIZE             equ 1024 * 1024
 
-FS_OPEN_VOLUME       equ 0x08
+EFI_ST_CON_OUT              equ 64
+EFI_ST_BOOT_SERVICES        equ 96
 
-FILE_OPEN_MODE       equ 0x08
-FILE_READ_MODE       equ 0x20
+EFI_CONOUT_OUTPUT_STRING    equ 8
 
-;        ______________________________________________________
-;_______/ Code section
+EFI_BS_ALLOCATE_POOL        equ 64
+EFI_BS_FREE_POOL            equ 72
+EFI_BS_HANDLE_PROTOCOL      equ 152
+EFI_BS_LOAD_IMAGE           equ 200
+EFI_BS_START_IMAGE          equ 208
+EFI_BS_UNLOAD_IMAGE         equ 224
+EFI_BS_STALL                equ 248
+EFI_BS_SET_WATCHDOG_TIMER   equ 256
+
+EFI_LOADED_IMAGE_DEVICE_HANDLE equ 24
+
+EFI_SIMPLE_FS_OPEN_VOLUME   equ 8
+
+EFI_FILE_OPEN               equ 8
+EFI_FILE_CLOSE              equ 16
+EFI_FILE_READ               equ 32
+
+
+; ============================================================
+; Llamadas UEFI con Microsoft x64 ABI
+; ============================================================
+
+%macro EFI_CALL 1
+    push rbp
+    mov rbp, rsp
+    and rsp, -16
+    sub rsp, 32
+    call %1
+    mov rsp, rbp
+    pop rbp
+%endmacro
+
+
+%macro EFI_CALL5 2
+    push rbp
+    mov rbp, rsp
+    and rsp, -16
+    sub rsp, 48
+    mov qword [rsp + 32], %2
+    call %1
+    mov rsp, rbp
+    pop rbp
+%endmacro
+
+
+%macro EFI_CALL6 3
+    push rbp
+    mov rbp, rsp
+    and rsp, -16
+    sub rsp, 48
+    mov qword [rsp + 32], %2
+    mov qword [rsp + 40], %3
+    call %1
+    mov rsp, rbp
+    pop rbp
+%endmacro
+
+
 section .text
 
-; UEFI entry point -> bootloader code
-; RCX = EFI_HANDLE ImageHandle
-; RDX = EFI_SYSTEM_TABLE SystemTable
+
+; ============================================================
+; Punto de entrada
+;
+; RCX = EFI_HANDLE de este cargador
+; RDX = EFI_SYSTEM_TABLE *
+; ============================================================
+
 efi_main:
-    ; start
-    mov qword [IMAGE_HANDLE], rcx ; save ImageHandle
-    mov qword [SYSTEM_TABLE], rdx ; save SystemTable
+    mov [rel image_handle], rcx
+    mov [rel system_table], rdx
 
-    ;---------------------------------------------------------
-    ; Print a startup message
-    ;---------------------------------------------------------
-    ; [SystemTable -> ConOut(protocol) -> OutputString(function)]
-    lea rcx, [rel msg]     ; RCX = string addr
-    call print_string      ; call PrintString(message)  
+    mov rax, [rdx + EFI_ST_BOOT_SERVICES]
+    mov [rel boot_services], rax
 
-    ;---------------------------------------------------------
-    ; Print a message before calling kernel/program
-    ;---------------------------------------------------------
-    ; [SystemTable -> ConOut(protocol) -> OutputString(function)]
-    lea rcx, [rel sys_msg] ; RCX = string addr
-    call print_string      ; call PrintString(message)  
+    lea rcx, [rel msg_loading]
+    call print_string
 
-    ;---------------------------------------------------------
-    ; Use EFI filesystem to load the .BIN file for kernel/program (hand-off)
-    ;---------------------------------------------------------
-    mov r12, [SYSTEM_TABLE]            ; R12 = SystemTable
-    mov r13, [r12 + EFI_BOOT_SERVICES] ; R13 = BootServices
+    call load_clock_image
+    test rax, rax
+    js .load_failed
 
-    ; (1) Locate the filesystem handle
-    ; [SystemTable -> BootServices -> LocateHandleBuffer]
-    mov rax, [r13 + BS_LOCATE_HANDLE_BUF] ; RAX = LocateHandleBuffer
+    ; LoadImage ya copio y reubico el PE/COFF, por lo que el
+    ; buffer usado para leer el archivo puede liberarse ahora.
+    call release_app_buffer
 
-    sub rsp, 40
+    lea rcx, [rel msg_starting]
+    call print_string
 
-    mov rcx, 2                              ; RCX = SearchType [ByProtocol]
-    lea rdx, [rel SimpleFileSystemGuid]     ; RDX = Protocol GUID
-    lea r9,  [rel HandleCount]              ; R9 = NumberOfHandles *
-    lea r8,  [rel HandleBuffer]
-    mov qword [rsp + 32], r8                ; Buffer **
-    xor r8, r8                              ; R8  = SearchKey [NULL]
+    ; El Boot Manager puede dejar un watchdog activo. Un reloj
+    ; interactivo puede permanecer abierto mas de cinco minutos,
+    ; por lo que se deshabilita antes de iniciar la aplicacion.
+    call disable_watchdog
 
-    call rax        ; call LocateHandleBuffer(SearchType, GUID, SearchKey, NoHandles, Buffer)
-    add rsp, 40
+    ; Pausa breve para que el mensaje del cargador sea visible.
+    call loader_delay
 
-    test rax, rax   ; EFI_SUCCESS = 0
-    jz  .filesystem_handle_continue
-    .filesystem_handle_error:
-        lea rcx, [rel fsh_err]; RCX = string addr
-        call print_string     ; call PrintString(message)
-        jmp $
-    .filesystem_handle_continue:
-    ; (2) Get the filesystem handle
-    ; [HandleBuffer -> SimpleFileSystem]
-    mov rbx, [rel HandleBuffer]         ; SimpleFileSystemHandle <- pointer to start of the handle buffer
+    mov rax, [rel boot_services]
+    mov rax, [rax + EFI_BS_START_IMAGE]
 
-    ; (3) Get the SimpleFileSystem protocol
-    ; [SystemTable -> BootServices -> HandleProtocol]
-    mov rax, [r13 + BS_HANDLE_PROTOCOL] ; RAX = HandleProtocol 
+    mov rcx, [rel child_image_handle]
+    xor edx, edx
+    xor r8d, r8d
 
-    mov rcx, [rbx]                      ; RCX = Handle          <- actual first element of the handle buffer
-    lea rdx, [rel SimpleFileSystemGuid] ; RDX = Protocol GUID
-    lea r8,  [rel FileSystem]           ; R8  = Interface **
+    EFI_CALL rax
 
-    call rax        ; call HandleProtocol()
+    mov [rel last_status], rax
 
-    test rax, rax   ; EFI_SUCCESS = 0
-    jz  .filesystem_protocol_continue
-    .filesystem_protocol_error:
-        lea rcx, [rel fsp_err]; RCX = string addr
-        call print_string     ; call PrintString(message)
-        jmp $
-    .filesystem_protocol_continue:
-    ; (4) Use filesystem to open volume and open/read file
+    ; Una aplicacion UEFI se descarga automaticamente cuando
+    ; retorna de su punto de entrada.
+    mov qword [rel child_image_handle], 0
 
-    ; > Open volume
-    ; [SimpleFileSystem -> OpenVolume]
-    mov rbx, [rel FileSystem]        ; SimpleFileSystemProtocol
+    mov rax, [rel last_status]
+    test rax, rax
+    js .application_failed
 
-    mov rax, [rbx + FS_OPEN_VOLUME]  ; RAX = OpenVolume
+    lea rcx, [rel msg_returned]
+    call print_string
 
-    mov rcx, rbx                 ; RCX = FileSystem
-    lea rdx, [rel RootDirectory] ; RDX = Root **
-
-    call rax       ; call OpenVolume()
-
-    test rax, rax  ; EFI_SUCCESS = 0
-    jz  .filesystem_volume_continue
-    .filesystem_volume_error:
-        lea rcx, [rel fsv_err]; RCX = string addr
-        call print_string     ; call PrintString(message)
-        jmp $
-    .filesystem_volume_continue:
-    ; > Open file (program)
-    ; [FileProtocol -> OpenMode]
-    mov rbx, [rel RootDirectory]    ; FileProtocol
-
-    mov rax, [rbx + FILE_OPEN_MODE] ; RAX = FileOpen
-
-    sub rsp, 40
-
-    mov rcx, rbx                ; RCX = Root     
-    lea rdx, [rel ClockFile]    ; RDX = FileHandle **
-    lea r8,  [rel ClockPath]    ; R8 = filename
-    mov r9, 1                   ; R9 = OpenMode [EFI_FILE_MODE_READ]
-    mov qword [rsp + 32], 1     ; FileAttribute = 1
-
-    call rax       ; call FileOpen()
-    add rsp, 40
-
-    test rax, rax  ; EFI_SUCCESS = 0
-    jz  .file_open_continue
-    .file_open_error:
-        lea rcx, [rel fileo_err]; RCX = string addr
-        call print_string       ; call PrintString(message)
-        jmp $
-    .file_open_continue:
-    ; > Allocate memory for program
-    ; [SystemTable -> BootServices -> AllocatePool]
-    mov rax, [r13 + BS_ALLOCATE_POOL] ; AllocatePool
-
-    mov rcx, 1                  ; RCX = EfiLoaderCode [EFI_MEMORY_TYPE]
-    mov rdx, [rel BufferSize]   ; RDX = Size
-    lea r8,  [rel ClockBuffer]  ; R8  = **Buffer
-
-    call rax        ; call AllocatePool()
-
-    test rax, rax   ; EFI_SUCCESS = 0
-    jz  .memory_alloc_continue
-    .memory_alloc_error:
-        lea rcx, [rel mem_alloc_err]; RCX = string addr
-        call print_string           ; call PrintString(message)
-        jmp $
-    .memory_alloc_continue:
-    ; > Read file (program)
-    ; [FileProtocol -> ReadMode]
-    mov rax, [rbx + FILE_READ_MODE] ; FileRead
-
-    mov rcx, [rel ClockFile]   ; RCX = FileHandle
-    lea rdx, [rel BufferSize]  ; RDX = &BufferSize
-    mov r8,  [rel ClockBuffer] ; R8  = *Buffer
-
-    call rax        ; call FileRead()
-
-    test rax, rax   ; EFI_SUCCESS = 0
-    jz  .file_read_continue
-    .file_read_error:
-        lea rcx, [rel filer_err]; RCX = string addr
-        call print_string       ; call PrintString(message)
-        jmp $
-    .file_read_continue:
-    ; > Print success message
-    lea rcx, [rel ext_msg] ; RCX = string addr
-    call print_string      ; call PrintString(message)  
-
-    ; (5) Call program
-    add rsp, 32
-
-    mov rax, [rel ClockBuffer] ; RAX = program entry point
-    mov rcx, [IMAGE_HANDLE]    ; RCX = ImageHandle
-    mov rdx, [SYSTEM_TABLE]    ; RDX = SystemTable
-
-    call rax                   ; call program()
-    sub rsp, 32
-    ;---------------------------------------------------------
-    ; If kernel/program returns print a message
-    ;---------------------------------------------------------
-    lea rcx, [rel end_msg] ; RCX = string addr
-    call print_string      ; call PrintString(message)   
-
-    ; end
-    xor eax, eax            ; EFI_SUCCESS
-    jmp $ ; infinite loop to prevent returning to UEFI shell
+    xor eax, eax
     ret
 
-; PrintString(*str): string must be utf-16
-; [SystemTable -> ConOut -> OutputString]
-; RCX = string addr
+
+.load_failed:
+    mov [rel last_status], rax
+
+    call close_file_handles
+    call unload_child_image
+    call release_app_buffer
+
+    lea rcx, [rel msg_load_failed]
+    call print_string
+
+    mov rax, [rel last_status]
+    ret
+
+
+.application_failed:
+    lea rcx, [rel msg_application_failed]
+    call print_string
+
+    mov rax, [rel last_status]
+    ret
+
+
+; ============================================================
+; load_clock_image
+;
+; 1. Obtiene el dispositivo desde el Loaded Image Protocol.
+; 2. Abre el Simple File System de ese dispositivo.
+; 3. Lee EFI/CLOCK/CLOCK.EFI en memoria.
+; 4. Solicita al firmware cargar el PE/COFF con LoadImage().
+;
+; Retorna EFI_STATUS en RAX.
+; ============================================================
+
+load_clock_image:
+    ; Obtener EFI_LOADED_IMAGE_PROTOCOL para este ejecutable.
+    mov rax, [rel boot_services]
+    mov rax, [rax + EFI_BS_HANDLE_PROTOCOL]
+
+    mov rcx, [rel image_handle]
+    lea rdx, [rel loaded_image_protocol_guid]
+    lea r8, [rel loaded_image_protocol]
+
+    EFI_CALL rax
+
+    test rax, rax
+    js .return
+
+    mov r10, [rel loaded_image_protocol]
+    test r10, r10
+    jz .not_found
+
+    mov rcx, [r10 + EFI_LOADED_IMAGE_DEVICE_HANDLE]
+    test rcx, rcx
+    jz .not_found
+
+    ; Obtener EFI_SIMPLE_FILE_SYSTEM_PROTOCOL en el mismo medio.
+    mov rax, [rel boot_services]
+    mov rax, [rax + EFI_BS_HANDLE_PROTOCOL]
+
+    lea rdx, [rel simple_file_system_protocol_guid]
+    lea r8, [rel simple_file_system]
+
+    EFI_CALL rax
+
+    test rax, rax
+    js .return
+
+    ; Abrir el directorio raiz del volumen.
+    mov rcx, [rel simple_file_system]
+    test rcx, rcx
+    jz .not_found
+
+    mov rax, [rcx + EFI_SIMPLE_FS_OPEN_VOLUME]
+    lea rdx, [rel root_handle]
+
+    EFI_CALL rax
+
+    test rax, rax
+    js .return
+
+    ; Abrir \EFI\CLOCK\CLOCK.EFI en modo lectura.
+    mov rcx, [rel root_handle]
+    mov rax, [rcx + EFI_FILE_OPEN]
+
+    lea rdx, [rel app_file_handle]
+    lea r8, [rel app_path]
+    mov r9, EFI_FILE_MODE_READ
+    xor r10d, r10d
+
+    EFI_CALL5 rax, r10
+
+    test rax, rax
+    js .cleanup_error
+
+    ; Reservar memoria temporal para el archivo PE/COFF.
+    mov rax, [rel boot_services]
+    mov rax, [rax + EFI_BS_ALLOCATE_POOL]
+
+    mov ecx, EFI_LOADER_DATA
+    mov edx, APP_BUFFER_SIZE
+    lea r8, [rel app_buffer]
+
+    EFI_CALL rax
+
+    test rax, rax
+    js .cleanup_error
+
+    ; Read() actualiza app_buffer_size con los bytes leidos.
+    mov qword [rel app_buffer_size], APP_BUFFER_SIZE
+
+    mov rcx, [rel app_file_handle]
+    mov rax, [rcx + EFI_FILE_READ]
+
+    lea rdx, [rel app_buffer_size]
+    mov r8, [rel app_buffer]
+
+    EFI_CALL rax
+
+    test rax, rax
+    js .cleanup_error
+
+    cmp qword [rel app_buffer_size], 0
+    je .empty_file
+
+    call close_file_handles
+
+    ; LoadImage(FALSE, parent, NULL, buffer, size, &child).
+    mov rax, [rel boot_services]
+    mov rax, [rax + EFI_BS_LOAD_IMAGE]
+
+    xor ecx, ecx
+    mov rdx, [rel image_handle]
+    xor r8d, r8d
+    mov r9, [rel app_buffer]
+    mov r10, [rel app_buffer_size]
+    lea r11, [rel child_image_handle]
+
+    EFI_CALL6 rax, r10, r11
+
+.return:
+    ret
+
+
+.not_found:
+    mov rax, EFI_NOT_FOUND
+    ret
+
+
+.empty_file:
+    mov rax, EFI_LOAD_ERROR
+
+
+.cleanup_error:
+    mov [rel last_status], rax
+    call close_file_handles
+    call release_app_buffer
+    mov rax, [rel last_status]
+    ret
+
+
+; ============================================================
+; Cierre de archivos abiertos
+; ============================================================
+
+close_file_handles:
+    mov rcx, [rel app_file_handle]
+    test rcx, rcx
+    jz .close_root
+
+    mov rax, [rcx + EFI_FILE_CLOSE]
+    EFI_CALL rax
+
+    mov qword [rel app_file_handle], 0
+
+.close_root:
+    mov rcx, [rel root_handle]
+    test rcx, rcx
+    jz .done
+
+    mov rax, [rcx + EFI_FILE_CLOSE]
+    EFI_CALL rax
+
+    mov qword [rel root_handle], 0
+
+.done:
+    ret
+
+
+; ============================================================
+; Liberar el buffer temporal utilizado para leer CLOCK.EFI
+; ============================================================
+
+release_app_buffer:
+    mov rcx, [rel app_buffer]
+    test rcx, rcx
+    jz .done
+
+    mov rax, [rel boot_services]
+    mov rax, [rax + EFI_BS_FREE_POOL]
+
+    EFI_CALL rax
+
+    mov qword [rel app_buffer], 0
+
+.done:
+    ret
+
+
+; ============================================================
+; Descargar una imagen que LoadImage creo pero que no se inicio
+; ============================================================
+
+unload_child_image:
+    mov rcx, [rel child_image_handle]
+    test rcx, rcx
+    jz .done
+
+    mov rax, [rel boot_services]
+    mov rax, [rax + EFI_BS_UNLOAD_IMAGE]
+
+    EFI_CALL rax
+
+    mov qword [rel child_image_handle], 0
+
+.done:
+    ret
+
+
+; ============================================================
+; Deshabilitar watchdog del Boot Manager
+; ============================================================
+
+disable_watchdog:
+    mov rax, [rel boot_services]
+    mov rax, [rax + EFI_BS_SET_WATCHDOG_TIMER]
+
+    xor ecx, ecx
+    xor edx, edx
+    xor r8d, r8d
+    xor r9d, r9d
+
+    EFI_CALL rax
+    ret
+
+
+; ============================================================
+; Pausa de un segundo mediante Boot Services Stall()
+; ============================================================
+
+loader_delay:
+    mov rax, [rel boot_services]
+    mov rax, [rax + EFI_BS_STALL]
+
+    mov ecx, 1000000
+
+    EFI_CALL rax
+    ret
+
+
+; ============================================================
+; OutputString(ConOut, RCX)
+; ============================================================
+
 print_string:
-    ; start
-    push rcx
-    mov r8, [SYSTEM_TABLE]  ; R8  = SystemTable
-    
-    mov rcx, [r8 + EFI_TEXT_OUTPUT]    ; RCX = ConOut [at offset 0x40]
-    pop rdx                            ; RDX = string address
-    
-    mov rax, [rcx + COUT_OUTPUT_STRING]; RAX = OutputString [at offset 0x08]
-    call rax                ; call OutputString(ConOut, message)
+    mov r10, rcx
 
-    ; end
+    mov r11, [rel system_table]
+    mov rcx, [r11 + EFI_ST_CON_OUT]
+    mov rdx, r10
+
+    mov rax, [rcx + EFI_CONOUT_OUTPUT_STRING]
+    EFI_CALL rax
     ret
 
-;        ______________________________________________________
-;_______/ Data section
+
 section .data
-    ; > Message strings
-    msg     dw __utf16__(`Bootloader running...\r\n`), 0
-    sys_msg dw __utf16__(`Calling for kernel/program...\r\n`), 0
-    ext_msg dw __utf16__(`[SUCESS] All kernel/program operations succeded\r\n`), 0
-    end_msg dw __utf16__(`Returning to bootloader...\r\n`), 0
 
-    fsh_err dw __utf16__(`[ERROR](SimpleFileSystem) Failure to get handle\r\n`), 0
-    fsp_err dw __utf16__(`[ERROR](SimpleFileSystem) Failure to get protocol\r\n`), 0
-    fsv_err dw __utf16__(`[ERROR](SimpleFileSystem) Failure to open volume\r\n`), 0
+align 8
 
-    fileo_err dw __utf16__(`[ERROR](File) Failure to open\r\n`), 0
-    filer_err dw __utf16__(`[ERROR](File) Failure to read\r\n`), 0
+; EFI_LOADED_IMAGE_PROTOCOL_GUID
+loaded_image_protocol_guid:
+    dd 0x5B1B31A1
+    dw 0x9562
+    dw 0x11D2
+    db 0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B
 
-    mem_alloc_err dw __utf16__(`[ERROR](MemoryAllocate) Failure to allocate memory\r\n`), 0
+; EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID
+simple_file_system_protocol_guid:
+    dd 0x964E5B22
+    dw 0x6459
+    dw 0x11D2
+    db 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B
 
-    ; > EFI Simple File System GUID
-    SimpleFileSystemGuid:
-        dd 0x0964e5b22
-        dw 0x6459
-        dw 0x11D2
-        db 0x8E,0x39,0x00,0xA0,0xC9,0x69,0x72,0x3B
 
-    ; > File paths
-    ClockPath dw __utf16__(`app.bin`), 0
+; Ruta UTF-16: \EFI\CLOCK\CLOCK.EFI
+app_path:
+    dw 0x005C
+    dw 'E', 'F', 'I'
+    dw 0x005C
+    dw 'C', 'L', 'O', 'C', 'K'
+    dw 0x005C
+    dw 'C', 'L', 'O', 'C', 'K', '.', 'E', 'F', 'I'
+    dw 0
 
-    ; > Variables
-    HandleCount     dq 0   ; number of handles in buffer
-    HandleBuffer    dq 0  ; address of handle buffer for LocateHandleBuffer()
-    FileSystem      dq 0    ; address of Simple File System protocol
-    RootDirectory   dq 0 ; address of root directory (FileProtocol) handle
-    ClockFile       dq 0     ; address of file handle
-    ClockBuffer     dq 0   ; address of buffer
-    BufferSize      dq 1024 ; size in bytes (1024 bytes = 1 kB)
+
+msg_loading:
+    dw __utf16__(`Bootloader UEFI: cargando el reloj...\r\n`), 0
+
+msg_starting:
+    dw __utf16__(`Aplicacion encontrada. Iniciando...\r\n`), 0
+
+msg_returned:
+    dw __utf16__(`\r\nEl reloj regreso correctamente al firmware.\r\n`), 0
+
+msg_load_failed:
+    dw __utf16__(`ERROR: no se pudo cargar EFI\\CLOCK\\CLOCK.EFI.\r\n`), 0
+
+msg_application_failed:
+    dw __utf16__(`\r\nERROR: la aplicacion UEFI retorno un error.\r\n`), 0
+
 
 section .bss
-    ; > Global EFI attributes (64-bit)
-    IMAGE_HANDLE resq 1 ; EFI_HANDLE       -> ImageHandle (entry point)
-    SYSTEM_TABLE resq 1 ; EFI_SYSTEM_TABLE -> EFI system table for protocols & services (entry point)
+
+align 8
+
+image_handle:           resq 1
+system_table:           resq 1
+boot_services:          resq 1
+
+loaded_image_protocol:  resq 1
+simple_file_system:     resq 1
+root_handle:            resq 1
+app_file_handle:        resq 1
+
+app_buffer:             resq 1
+app_buffer_size:        resq 1
+child_image_handle:     resq 1
+
+last_status:            resq 1

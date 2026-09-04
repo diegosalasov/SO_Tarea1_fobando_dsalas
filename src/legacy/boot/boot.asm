@@ -1,46 +1,60 @@
-[BITS 16]       ; 16 bit mode
-[ORG 0x7C00]    ; Set the origin to 0x7C00, where the BIOS loads the bootloader
+[BITS 16]
+[ORG 0x7C00]
 
-; Bootloader setup
-clock equ 0x7E00
+%ifndef APP_SECTORS
+    %error "APP_SECTORS debe calcularse a partir de app.bin"
+%endif
 
-; Bootloader code (512 bytes)
+; Normalizar CS:IP porque distintas BIOS pueden entrar como
+; 0000:7C00 o 07C0:0000.
+jmp 0x0000:start
+
 start:
-    ; Here starts the bootloader
-    xor ax, ax        ; Clear AX
-    xor bx, bx        ; Clear BX
-    xor cx, cx        ; Clear CX
-    xor dx, dx        ; Clear DX
-    xor si, si        ; Clear SI
+    cli
 
-    ; Print a message to the screen
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+    mov sp, 0x7C00
+
+    sti
+    cld
+
+    ; La BIOS entrega en DL la unidad desde la que arranco.
+    mov [boot_drive], dl
+
     mov si, message
-    call print_s
+    call printf
 
-    ; Load a new disk sector to RAM (app.asm)
-    mov ax, 0x0000
-    mov es, ax          ; Destination Segment ES=0x0000
-    mov bx, clock       ; Destination Offset  BX=0x7E00
-    mov al, 0x01        ; Read 1
-    mov dl, 0x80        ; Drive 0
-    mov ch, 0x00        ; Cylinder 0
-    mov dh, 0x00        ; Head 0
-    mov cl, 0x02        ; Sector 2
-    call disk_read
+    ; Cargar la aplicacion desde el sector 2 en 0000:7E00.
+    xor ax, ax
+    mov es, ax
+    mov bx, APP_LOAD_ADDRESS
 
-    ; Program handoff
-    call clock
+    mov dl, [boot_drive]
+    mov ch, 0x00
+    mov cl, 0x02
+    mov dh, 0x00
+    mov al, APP_SECTORS
 
-    ; End of bootloader code (loop forever)
-    jmp $
+    call read_sector
 
-; Bootloader data
-message db "Bootloader running...", 0x0D, 0x0A, 0
+    ; Transferir el control con CS normalizado a cero.
+    jmp 0x0000:APP_LOAD_ADDRESS
+
+APP_LOAD_ADDRESS equ 0x7E00
+
+boot_drive:
+    db 0
+
+message:
+    db "Bootloader running...", 0
 
 ; Bootloader utilities
 %include "src/legacy/utils/print.asm"
 %include "src/legacy/utils/disk_read.asm"
 
-; Fill the rest of the 512 bytes with zeros and add the boot signature
-times 510-($-$$) db 0 ; padding
-dw 0xAA55             ; boot signature
+; Completar el sector y agregar la firma de arranque.
+times 510-($-$$) db 0
+dw 0xAA55

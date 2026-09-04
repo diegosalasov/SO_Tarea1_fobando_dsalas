@@ -1,126 +1,335 @@
-# Tools
-ASM  = nasm
-QEMU = qemu-system-i386
-QEMU64 = qemu-system-x86_64
-GDB  = gdb
-LD   = x86_64-w64-mingw32-ld
+NASM := nasm
+DOSBOX := dosbox
+LLD_LINK := lld-link
 
-OVMF      = /usr/share/OVMF/OVMF_CODE_4M.fd
-OVMF_VARS = /usr/share/OVMF/OVMF_VARS_4M.fd
-
-# Targets
 MODE ?= legacy
 
-# Diretories
-SRC_DIR   = src/$(MODE)
-BUILD_DIR = build/$(MODE)
-BIN_DIR	  = bin/$(MODE)
+SRC_DIR := src/$(MODE)
+CLOCK_DIR := $(SRC_DIR)/clock
+BUILD_DIR := build/$(MODE)
 
-ESP_DIR   = $(BUILD_DIR)/esp
-EFI_DIR	  = $(ESP_DIR)/EFI/BOOT
+APP_SRC := $(CLOCK_DIR)/app.asm
 
-# Files
-FILE   = app
+CLOCK_SOURCES := $(wildcard $(CLOCK_DIR)/*.asm) \
+	$(wildcard $(CLOCK_DIR)/include/*.inc)
 
-BOOT   = $(SRC_DIR)/boot/boot.asm
-KERNEL = $(SRC_DIR)/clock/$(FILE).asm
 
-EFI	 = $(EFI_DIR)/BOOTX64.efi
-IMG  = $(BUILD_DIR)/disk.img
-
-BOOT_BIN   = $(BUILD_DIR)/boot.bin
-BOOT_OBJ   = $(BUILD_DIR)/boot.obj
-KERNEL_BIN = $(BIN_DIR)/$(FILE).bin
-
-VARS = $(BUILD_DIR)/OVMF_VARS_4M.fd
+.PHONY: all app boot build prog program run debug clean dirs
 
 all: build
 
-# Make directories if they don't exist
+
+# ============================================================
+# Directorios de salida
+# ============================================================
+
 dirs:
-	@echo "Creating directories for build and binaries... ($(MODE) mode)"
-	mkdir -p $(BUILD_DIR) $(BIN_DIR)
-	@if [ "$(MODE)" = "uefi" ]; then \
-		mkdir -p $(EFI_DIR); \
-	fi 
-	@echo "[DONE]"
-	@echo
+	@mkdir -p $(BUILD_DIR)
 
 
-# Compile programs
-program: dirs
-	@echo "Creating program binaries..."
-	@echo "> Compiling kernel: clock"
-	$(ASM) -f bin $(KERNEL) -o $(KERNEL_BIN)
-	@echo "Compiling finished!"
-	@echo "[DONE]"
-	@echo
+# ============================================================
+# LEGACY
+# ============================================================
 
-# Assemble bootloader and create disk image
-build: program
-	@echo "Building bootloader..."
-	@echo "[MODE = $(MODE)]"
-	@if [ "$(MODE)" = "legacy" ]; then \
-        echo "Compiling bootloader binaries..."; \
-		$(ASM) -f bin $(BOOT) -o $(BOOT_BIN); \
-		echo "Building image..."; \
-		dd if=/dev/zero of=$(IMG) bs=512 count=2880; \
-		dd if=$(BOOT_BIN)  of=$(IMG) bs=512 seek=0 conv=notrunc; \
-		dd if=$(KERNEL_BIN) of=$(IMG) bs=512 seek=1 conv=notrunc; \
-	elif [ "$(MODE)" = "uefi" ]; then \
-		echo "Copying OVMF vars to build directory..."; \
-		cp "$(OVMF_VARS)" "$(VARS)"; \
-        echo "Generating bootloader object code..."; \
-		$(ASM) -f win64 $(BOOT) -o $(BOOT_OBJ); \
-		echo "Linking object code..."; \
-		$(LD) --subsystem 10 --entry efi_main -o $(EFI) $(BOOT_OBJ); \
-		echo "Moving kernel to ESP dir"; \
-		cp "$(KERNEL_BIN)" "$(ESP_DIR)/$(FILE).bin"; \
-    else \
-        echo "ERROR: Unknown mode"; \
-    fi
-	@echo "Finished building bootloader!"
-	@echo "[DONE]"
-	@echo
+ifeq ($(MODE),legacy)
 
-# Run normally
+QEMU := qemu-system-i386
+
+UTILS_DIR := $(SRC_DIR)/utils
+
+BOOT_SRC := $(SRC_DIR)/boot/boot.asm
+
+BOOT_BIN := $(BUILD_DIR)/boot.bin
+APP_BIN := $(BUILD_DIR)/app.bin
+APP_COM := $(BUILD_DIR)/reloj.com
+DISK_IMG := $(BUILD_DIR)/disk.img
+
+BOOT_SOURCES := $(BOOT_SRC) $(wildcard $(UTILS_DIR)/*.asm)
+
+APP_ASM_FLAGS := -f bin \
+	-I$(CLOCK_DIR)/include/ \
+	-I$(CLOCK_DIR)/
+
+
+.PHONY: test run-test debug disasm
+
+
+# ============================================================
+# Aplicacion Legacy
+# ============================================================
+
+app: $(APP_BIN)
+
+boot: $(BOOT_BIN)
+
+prog: app
+
+program: app
+
+
+$(APP_BIN): $(CLOCK_SOURCES) | dirs
+	$(NASM) $(APP_ASM_FLAGS) $(APP_SRC) -o $(APP_BIN)
+
+
+# ============================================================
+# Bootloader e imagen booteable Legacy
+# ============================================================
+
+$(BOOT_BIN): $(BOOT_SOURCES) $(APP_BIN) | dirs
+	@app_size=$$(wc -c < "$(APP_BIN)"); \
+	app_sectors=$$(( ($$app_size + 511) / 512 )); \
+	if [ "$$app_sectors" -gt 17 ]; then \
+		echo "ERROR: app.bin ocupa $$app_sectors sectores; Legacy admite como maximo 17" >&2; \
+		exit 1; \
+	fi; \
+	$(NASM) -f bin \
+		-I./ \
+		-DAPP_SECTORS=$$app_sectors \
+		$(BOOT_SRC) \
+		-o $(BOOT_BIN)
+
+
+$(DISK_IMG): $(BOOT_BIN) $(APP_BIN) | dirs
+	dd if=/dev/zero \
+		of=$(DISK_IMG) \
+		bs=512 \
+		count=2880 \
+		status=none
+
+	dd if=$(BOOT_BIN) \
+		of=$(DISK_IMG) \
+		bs=512 \
+		seek=0 \
+		conv=notrunc \
+		status=none
+
+	dd if=$(APP_BIN) \
+		of=$(DISK_IMG) \
+		bs=512 \
+		seek=1 \
+		conv=notrunc \
+		status=none
+
+
+build: $(DISK_IMG)
+
+
+# ============================================================
+# Ejecucion Legacy
+# ============================================================
+
 run: build
-	@echo "Running QEMU... ($(MODE) mode)"
-	@if [ "$(MODE)" = "legacy" ]; then \
-		$(QEMU) -drive format=raw,file=$(IMG); \
-	elif [ "$(MODE)" = "uefi" ]; then \
-		$(QEMU64) \
-		-machine q35 \
-		-m 128M \
-		-drive if=pflash,format=raw,readonly=on,file=$(OVMF) \
-		-drive if=pflash,format=raw,file=$(VARS) \
-		-drive format=raw,file=fat:rw:$(ESP_DIR),if=virtio; \
-	else \
-		echo "ERROR: Unknown mode"; \
-	fi
+	$(QEMU) \
+		-drive file=$(DISK_IMG),format=raw,if=floppy \
+		-boot a \
+		-rtc base=localtime
 
-# Run QEMU waiting for GDB
+
+# ============================================================
+# Depuracion Legacy
+# ============================================================
+
 debug: build
-	@echo "Running QEMU in debug mode... ($(MODE) mode)"
-	@if [ "$(MODE)" = "legacy" ]; then \
-		$(QEMU) -drive format=raw,file=$(IMG) -S -gdb tcp::1234; \
-	elif [ "$(MODE)" = "uefi" ]; then \
-		$(QEMU64) \
+	$(QEMU) \
+		-drive file=$(DISK_IMG),format=raw,if=floppy \
+		-boot a \
+		-rtc base=localtime \
+		-S \
+		-gdb tcp::1234
+
+
+# ============================================================
+# Version temporal DOSBox
+# ============================================================
+
+test: $(APP_COM)
+
+
+$(APP_COM): $(CLOCK_SOURCES) | dirs
+	$(NASM) \
+		-DDOS_TEST=1 \
+		$(APP_ASM_FLAGS) \
+		$(APP_SRC) \
+		-o $(APP_COM)
+
+
+run-test: test
+	$(DOSBOX) \
+		-c "mount c ." \
+		-c "c:" \
+		-c "cd build/legacy" \
+		-c "reloj.com" \
+		-c "exit"
+
+
+# ============================================================
+# Desensamblado Legacy
+# ============================================================
+
+disasm: app
+	ndisasm -b 16 $(APP_BIN)
+
+
+# ============================================================
+# UEFI
+# ============================================================
+
+else ifeq ($(MODE),uefi)
+
+QEMU := qemu-system-x86_64
+
+BOOT_SRC := $(SRC_DIR)/boot/boot.asm
+
+APP_OBJ := $(BUILD_DIR)/clock.obj
+APP_EFI := $(BUILD_DIR)/clock.efi
+BOOT_OBJ := $(BUILD_DIR)/boot.obj
+BOOT_EFI := $(BUILD_DIR)/bootx64.efi
+DISK_IMG := $(BUILD_DIR)/uefi.img
+
+OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
+OVMF_VARS_TEMPLATE ?= /usr/share/OVMF/OVMF_VARS_4M.fd
+OVMF_VARS := $(BUILD_DIR)/OVMF_VARS.fd
+
+
+# ============================================================
+# Aplicacion UEFI
+# ============================================================
+
+app: $(APP_EFI)
+
+boot: $(BOOT_EFI)
+
+prog: app
+
+program: app
+
+
+$(APP_OBJ): $(CLOCK_SOURCES) | dirs
+	$(NASM) \
+		-f win64 \
+		-I$(CLOCK_DIR)/include/ \
+		-I$(CLOCK_DIR)/ \
+		$(APP_SRC) \
+		-o $(APP_OBJ)
+
+
+$(APP_EFI): $(APP_OBJ)
+	$(LLD_LINK) \
+		/nologo \
+		/subsystem:efi_application \
+		/entry:efi_main \
+		/machine:x64 \
+		/nodefaultlib \
+		/dll \
+		/out:$(APP_EFI) \
+		$(APP_OBJ)
+
+
+# ============================================================
+# Bootloader UEFI
+# ============================================================
+
+$(BOOT_OBJ): $(BOOT_SRC) $(APP_EFI) | dirs
+	@app_size=$$(wc -c < "$(APP_EFI)"); \
+	if [ "$$app_size" -gt 1048576 ]; then \
+		echo "ERROR: clock.efi excede el buffer de 1 MiB del bootloader" >&2; \
+		exit 1; \
+	fi
+	$(NASM) \
+		-f win64 \
+		$(BOOT_SRC) \
+		-o $(BOOT_OBJ)
+
+
+$(BOOT_EFI): $(BOOT_OBJ)
+	$(LLD_LINK) \
+		/nologo \
+		/subsystem:efi_application \
+		/entry:efi_main \
+		/machine:x64 \
+		/nodefaultlib \
+		/dll \
+		/out:$(BOOT_EFI) \
+		$(BOOT_OBJ)
+
+
+$(OVMF_VARS): | dirs
+	cp $(OVMF_VARS_TEMPLATE) $(OVMF_VARS)
+
+
+# ============================================================
+# Imagen FAT UEFI
+# ============================================================
+
+$(DISK_IMG): $(BOOT_EFI) $(APP_EFI) | dirs
+	dd if=/dev/zero \
+		of=$(DISK_IMG) \
+		bs=1M \
+		count=64 \
+		status=none
+
+	mkfs.fat -F 32 $(DISK_IMG)
+
+	mmd -i $(DISK_IMG) ::/EFI
+	mmd -i $(DISK_IMG) ::/EFI/BOOT
+	mmd -i $(DISK_IMG) ::/EFI/CLOCK
+
+	mcopy -i $(DISK_IMG) \
+		$(BOOT_EFI) \
+		::/EFI/BOOT/BOOTX64.EFI
+
+	mcopy -i $(DISK_IMG) \
+		$(APP_EFI) \
+		::/EFI/CLOCK/CLOCK.EFI
+
+
+build: $(DISK_IMG) $(OVMF_VARS)
+
+
+# ============================================================
+# Ejecucion UEFI
+# ============================================================
+
+run: build
+	$(QEMU) \
 		-machine q35 \
 		-m 128M \
-		-drive if=pflash,format=raw,readonly=on,file=$(OVMF) \
-		-drive if=pflash,format=raw,file=$(VARS) \
-		-drive format=raw,file=fat:rw:$(ESP_DIR),if=virtio \
-		-s \
-		-S ;\
-	else \
-		echo "ERROR: Unknown mode"; \
-	fi
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,format=raw,file=$(OVMF_VARS) \
+		-drive format=raw,file=$(DISK_IMG) \
+		-rtc base=localtime
 
-# Remove generated files
+
+# ============================================================
+# Depuracion UEFI
+# ============================================================
+
+debug: build
+	$(QEMU) \
+		-machine q35 \
+		-m 128M \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,format=raw,file=$(OVMF_VARS) \
+		-drive format=raw,file=$(DISK_IMG) \
+		-rtc base=localtime \
+		-S \
+		-gdb tcp::1234
+
+
+# ============================================================
+# Modo invalido
+# ============================================================
+
+else
+
+$(error MODE debe ser legacy o uefi)
+
+endif
+
+
+# ============================================================
+# Limpieza
+# ============================================================
+
 clean:
-	@echo "Cleaning generated files... ($(MODE) mode)"
-	rm -r $(BUILD_DIR) $(BIN_DIR)
-	@echo "Done."
-
-.PHONY: all build run debug clean
+	rm -rf $(BUILD_DIR)
